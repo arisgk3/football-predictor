@@ -12,7 +12,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Expanded global leagues including European Competitions, MLS, and Major World Divisions
 LEAGUE_CODES = {
     "UEFA Champions League (Cross-League Pool)": "UCL",
     "UEFA Europa League & Conference (Elite Pool)": "UELE",
@@ -22,10 +21,6 @@ LEAGUE_CODES = {
     "Italian Serie A": "I1",
     "German Bundesliga": "D1",
     "French Ligue 1": "F1",
-    "Major League Soccer (MLS - USA)": "MLS",
-    "Argentine Primera División": "ASL",
-    "Brazilian Série A": "BSA",
-    "Mexican Liga MX": "LMX",
     "Greek Super League": "G1",
     "Dutch Eredivisie": "N1",
     "Portuguese Primeira Liga": "P1",
@@ -50,14 +45,10 @@ def load_global_football_data(league_code, seasons, uploaded_file=None):
         return pd.DataFrame()
     return pd.DataFrame()
 
-  # Map custom multi-league pools
   if league_code == "UCL":
     codes = ["E0", "SP1", "I1", "D1", "F1", "P1", "N1"]
   elif league_code == "UELE":
     codes = ["E1", "SP2", "I2", "D2", "G1", "P1"]
-  elif league_code == "MLS":
-    # Fallback or specific feed mapping if available, else synthetic global blend
-    codes = ["E0", "SP1"]
   else:
     codes = [league_code]
 
@@ -205,10 +196,17 @@ class GlobalDixonColesPredictor:
     p_btts = np.sum(mat[1:, 1:])
     p_ht_over05 = 1.0 - np.exp(-(lam_ht + mu_ht))
 
-    top_scores = [
-        (f"{idx // max_g} - {idx % max_g}", mat.ravel()[idx])
-        for idx in np.argsort(mat.ravel())[::-1][:5]
-    ]
+    top_scores = []
+    flat_idx = np.argsort(mat.ravel())[::-1]
+    for idx in flat_idx[:15]:  # Top 15 scorelines for comprehensive chart
+      hg = idx // max_g
+      ag = idx % max_g
+      prob = mat.ravel()[idx]
+      top_scores.append({
+          "Scoreline": f"{hg} - {ag}",
+          "Probability (%)": round(prob * 100, 2),
+          "Fair Odds": round(1.0 / prob, 2) if prob > 0 else 99.9,
+      })
 
     return {
         "home_xg": lam,
@@ -221,13 +219,15 @@ class GlobalDixonColesPredictor:
             "BTTS (Goal)": p_btts,
             "1H Over 0.5": p_ht_over05,
         },
-        "top_scores": top_scores,
+        "score_matrix": top_scores,
     }
 
 
 st.title("🌍 Global Football Value & Kelly Engine")
 with st.sidebar:
-  league_name = st.selectbox("Select Competition / League", list(LEAGUE_CODES.keys()))
+  league_name = st.selectbox(
+      "Select Competition / League", list(LEAGUE_CODES.keys())
+  )
   league_code = LEAGUE_CODES[league_name]
 
   uploaded_file = None
@@ -267,6 +267,7 @@ if not df_data.empty:
       cols[0].metric("Home xG", f"{res['home_xg']:.2f}")
       cols[1].metric("Away xG", f"{res['away_xg']:.2f}")
 
+      st.markdown("### 📊 Market Value & Kelly Staking Table")
       markets = [
           {
               "Market": k,
@@ -297,6 +298,20 @@ if not df_data.empty:
             "Action": "✅ BET" if ev > 0 else "❌ SKIP",
         })
       st.table(pd.DataFrame(recs))
+
+      st.markdown("### 🎯 Exact Score Probabilities Chart")
+      st.markdown(
+          "Calculated probabilities and fair decimal odds for the most likely"
+          " match scorelines based on the Dixon-Coles model:"
+      )
+
+      score_df = pd.DataFrame(res["score_matrix"])
+      st.dataframe(score_df, hide_index=True, use_container_width=True)
+
+      # Visual bar chart representation inside streamlit
+      chart_data = score_df.set_index("Scoreline")["Probability (%)"]
+      st.bar_chart(chart_data)
+
     except Exception as e:
       st.error(f"Prediction Error: {e}")
 elif league_code == "CUSTOM" and uploaded_file is None:
