@@ -14,6 +14,7 @@ st.set_page_config(
 
 LEAGUE_CODES = {
     "English Premier League (EPL)": "E0",
+    "English Championship": "E1",
     "Spanish La Liga": "SP1",
     "Italian Serie A": "I1",
     "German Bundesliga": "D1",
@@ -21,43 +22,53 @@ LEAGUE_CODES = {
     "Greek Super League": "G1",
     "Dutch Eredivisie": "N1",
     "Portuguese Primeira Liga": "P1",
-    "UEFA Champions League (Cross-League)": "UCL",
+    "India / Shillong (Custom CSV Upload)": "CUSTOM",
 }
 
 
 @st.cache_data(ttl=3600)
-def load_league_data(league_code, seasons):
-  if league_code == "UCL":
-    # For Champions League, combine top European leagues so all elite clubs are available
-    codes = ["E0", "SP1", "I1", "D1", "F1"]
-  else:
-    codes = [league_code]
+def load_league_data(league_code, seasons, uploaded_file=None):
+  if league_code == "CUSTOM":
+    if uploaded_file is not None:
+      try:
+        df = pd.read_csv(uploaded_file)
+        # Expected columns: Date, HomeTeam, AwayTeam, FTHG, FTAG
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        return (
+            df.dropna(subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
+            .sort_values("Date")
+            .reset_index(drop=True)
+        )
+      except Exception as e:
+        st.error(f"Error reading uploaded CSV: {e}")
+        return pd.DataFrame()
+    else:
+      return pd.DataFrame()
 
   frames = []
-  for code in codes:
-    for s in seasons:
-      url = f"https://www.football-data.co.uk/mmz4281/{s}/{code}.csv"
-      try:
-        df = pd.read_csv(url, encoding="latin1")
-        cols = [
-            "Date",
-            "HomeTeam",
-            "AwayTeam",
-            "FTHG",
-            "FTAG",
-            "HTHG",
-            "HTAG",
-            "HST",
-            "AST",
-        ]
-        available = [c for c in cols if c in df.columns]
-        df = df[available].dropna(
-            subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
-        )
-        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-        frames.append(df.dropna(subset=["Date"]))
-      except Exception:
-        pass
+  for s in seasons:
+    url = f"https://www.football-data.co.uk/mmz4281/{s}/{league_code}.csv"
+    try:
+      df = pd.read_csv(url, encoding="latin1")
+      cols = [
+          "Date",
+          "HomeTeam",
+          "AwayTeam",
+          "FTHG",
+          "FTAG",
+          "HTHG",
+          "HTAG",
+          "HST",
+          "AST",
+      ]
+      available = [c for c in cols if c in df.columns]
+      df = df[available].dropna(
+          subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
+      )
+      df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+      frames.append(df.dropna(subset=["Date"]))
+    except Exception:
+      pass
   return (
       pd.concat(frames, ignore_index=True)
       .sort_values("Date")
@@ -127,7 +138,7 @@ class StreamlitFootballPredictor:
   def predict(self, df, home, away, kickoff_dt):
     hist = df[df["Date"] < kickoff_dt].copy()
     if hist.empty:
-      raise ValueError("No historical matches prior to this date.")
+      raise ValueError("No historical matches prior to this date in dataset.")
     teams = sorted(list(set(hist["HomeTeam"]).union(set(hist["AwayTeam"]))))
     team_idx = {t: i for i, t in enumerate(teams)}
     if home not in team_idx or away not in team_idx:
@@ -147,16 +158,31 @@ class StreamlitFootballPredictor:
       hist["Eff_HG"], hist["Eff_AG"] = hist["FTHG"], hist["FTAG"]
 
     ft_p = self._fit_dc(hist, "Eff_HG", "Eff_AG", teams, team_idx, use_rho=True)
-    ht_hist = hist.dropna(subset=["HTHG", "HTAG"])
-    ht_p = self._fit_dc(
-        ht_hist, "HTHG", "HTAG", teams, team_idx, use_rho=False
-    )
+
+    has_ht = "HTHG" in hist.columns and hist["HTHG"].notna().sum() > 2
+    if has_ht:
+      ht_p = self._fit_dc(
+          hist.dropna(subset=["HTHG", "HTAG"]),
+          "HTHG",
+          "HTAG",
+          teams,
+          team_idx,
+          use_rho=False,
+      )
+      lam_ht = np.exp(
+          ht_p["alpha"][team_idx[home]]
+          + ht_p["beta"][team_idx[away]]
+          + ht_p["gamma"]
+      )
+      mu_ht = np.exp(
+          ht_p["alpha"][team_idx[away]] + ht_p["beta"][team_idx[home]]
+      )
+    else:
+      lam_ht, mu_ht = 0.6, 0.4
 
     h_i, a_i = team_idx[home], team_idx[away]
     lam = np.exp(ft_p["alpha"][h_i] + ft_p["beta"][a_i] + ft_p["gamma"])
     mu = np.exp(ft_p["alpha"][a_i] + ft_p["beta"][h_i])
-    lam_ht = np.exp(ht_p["alpha"][h_i] + ht_p["beta"][a_i] + ht_p["gamma"])
-    mu_ht = np.exp(ht_p["alpha"][a_i] + ht_p["beta"][h_i])
 
     max_g = 8
     goals = np.arange(max_g)
@@ -200,13 +226,27 @@ class StreamlitFootballPredictor:
 st.title("⚽ Football Value & Kelly Calculator")
 with st.sidebar:
   league_name = st.selectbox("Select League", list(LEAGUE_CODES.keys()))
-  seasons = st.multiselect(
-      "Seasons", ["2526", "2627"], default=["2526", "2627"]
-  )
+  league_code = LEAGUE_CODES[league_name]
+
+  uploaded_file = None
+  if league_code == "CUSTOM":
+    st.markdown("### Upload Shillong / Local CSV")
+    st.markdown(
+        "Upload a CSV file containing columns: `Date`, `HomeTeam`, `AwayTeam`,"
+        " `FTHG`, `FTAG`"
+    )
+    uploaded_file = st.file_uploader("Choose CSV file", type=["csv"])
+    seasons = []
+  else:
+    seasons = st.multiselect(
+        "Seasons", ["2526", "2627"], default=["2526", "2627"]
+    )
+
   bankroll = st.number_input("Bankroll (€)", value=1000.0)
   kelly_fraction = st.slider("Kelly Fraction", 0.1, 1.0, 0.25)
 
-df_data = load_league_data(LEAGUE_CODES[league_name], tuple(seasons))
+df_data = load_league_data(league_code, tuple(seasons), uploaded_file)
+
 if not df_data.empty:
   teams = sorted(
       list(set(df_data["HomeTeam"]).union(set(df_data["AwayTeam"])))
@@ -218,41 +258,49 @@ if not df_data.empty:
   m_date = c3.date_input("Date", value=datetime.today())
 
   if st.button("Run Prediction", type="primary"):
-    res = StreamlitFootballPredictor().predict(
-        df_data, home, away, datetime.combine(m_date, datetime.min.time())
-    )
-    st.success("Computed!")
-    cols = st.columns(2)
-    cols[0].metric("Home xG", f"{res['home_xg']:.2f}")
-    cols[1].metric("Away xG", f"{res['away_xg']:.2f}")
-
-    markets = [
-        {
-            "Market": k,
-            "Prob (%)": round(v * 100, 2),
-            "Fair Odds": round(1 / v, 2),
-            "Bookie Odds": round((1 / v) * 1.08, 2),
-        }
-        for k, v in res["markets"].items()
-    ]
-    edited = st.data_editor(pd.DataFrame(markets), hide_index=True)
-
-    recs = []
-    for _, r in edited.iterrows():
-      p, b = r["Prob (%)"] / 100.0, r["Bookie Odds"]
-      ev = (p * b) - 1.0
-      stake = (
-          max(
-              0.0,
-              (((p * b - 1.0) / (b - 1.0)) * kelly_fraction * bankroll),
-          )
-          if b > 1
-          else 0
+    try:
+      res = StreamlitFootballPredictor().predict(
+          df_data, home, away, datetime.combine(m_date, datetime.min.time())
       )
-      recs.append({
-          "Market": r["Market"],
-          "EV": f"{ev*100:+.2f}%",
-          "Stake": f"€{stake:.2f}",
-          "Action": "✅ BET" if ev > 0 else "❌ SKIP",
-      })
-    st.table(pd.DataFrame(recs))
+      st.success("Computed successfully!")
+      cols = st.columns(2)
+      cols[0].metric("Home xG", f"{res['home_xg']:.2f}")
+      cols[1].metric("Away xG", f"{res['away_xg']:.2f}")
+
+      markets = [
+          {
+              "Market": k,
+              "Prob (%)": round(v * 100, 2),
+              "Fair Odds": round(1 / v, 2),
+              "Bookie Odds": round((1 / v) * 1.08, 2),
+          }
+          for k, v in res["markets"].items()
+      ]
+      edited = st.data_editor(pd.DataFrame(markets), hide_index=True)
+
+      recs = []
+      for _, r in edited.iterrows():
+        p, b = r["Prob (%)"] / 100.0, r["Bookie Odds"]
+        ev = (p * b) - 1.0
+        stake = (
+            max(
+                0.0,
+                (((p * b - 1.0) / (b - 1.0)) * kelly_fraction * bankroll),
+            )
+            if b > 1
+            else 0
+        )
+        recs.append({
+            "Market": r["Market"],
+            "EV": f"{ev*100:+.2f}%",
+            "Stake": f"€{stake:.2f}",
+            "Action": "✅ BET" if ev > 0 else "❌ SKIP",
+        })
+      st.table(pd.DataFrame(recs))
+    except Exception as e:
+      st.error(f"Prediction Error: {e}")
+elif league_code == "CUSTOM" and uploaded_file is None:
+  st.info(
+      "Please upload a CSV file for the Shillong First Division / local league"
+      " using the sidebar to begin."
+  )
