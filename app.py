@@ -13,7 +13,6 @@ st.set_page_config(
 )
 
 LEAGUE_CODES = {
-    "UEFA Champions League (UCL)": "UCL",
     "English Premier League (EPL)": "E0",
     "Spanish La Liga": "SP1",
     "Italian Serie A": "I1",
@@ -22,36 +21,22 @@ LEAGUE_CODES = {
     "Greek Super League": "G1",
     "Dutch Eredivisie": "N1",
     "Portuguese Primeira Liga": "P1",
+    "UEFA Champions League (Cross-League)": "UCL",
 }
 
 
 @st.cache_data(ttl=3600)
 def load_league_data(league_code, seasons):
+  if league_code == "UCL":
+    # For Champions League, combine top European leagues so all elite clubs are available
+    codes = ["E0", "SP1", "I1", "D1", "F1"]
+  else:
+    codes = [league_code]
+
   frames = []
-  for s in seasons:
-    if league_code == "UCL":
-      # Pulls open-source Champions League match data from GitHub
-      url = f"https://raw.githubusercontent.com/openfootball/champions-league/master/{s.lower()[:2]}-{s.lower()[2:]}/cl.csv"
-      try:
-        df = pd.read_csv(url)
-        # Openfootball format cleaning
-        df = df.rename(
-            columns={
-                "Date": "Date",
-                "Team 1": "HomeTeam",
-                "Team 2": "AwayTeam",
-                "FT1": "FTHG",
-                "FT2": "FTAG",
-            }
-        )
-        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-        frames.append(
-            df.dropna(subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
-        )
-      except Exception:
-        pass
-    else:
-      url = f"https://www.football-data.co.uk/mmz4281/{s}/{league_code}.csv"
+  for code in codes:
+    for s in seasons:
+      url = f"https://www.football-data.co.uk/mmz4281/{s}/{code}.csv"
       try:
         df = pd.read_csv(url, encoding="latin1")
         cols = [
@@ -146,7 +131,7 @@ class StreamlitFootballPredictor:
     teams = sorted(list(set(hist["HomeTeam"]).union(set(hist["AwayTeam"]))))
     team_idx = {t: i for i, t in enumerate(teams)}
     if home not in team_idx or away not in team_idx:
-      raise ValueError("Teams not found in dataset.")
+      raise ValueError(f"Teams '{home}' or '{away}' not found in dataset.")
 
     hist["weight"] = np.exp(
         -self.xi * (kickoff_dt - hist["Date"]).dt.days.clip(lower=0)
@@ -162,32 +147,16 @@ class StreamlitFootballPredictor:
       hist["Eff_HG"], hist["Eff_AG"] = hist["FTHG"], hist["FTAG"]
 
     ft_p = self._fit_dc(hist, "Eff_HG", "Eff_AG", teams, team_idx, use_rho=True)
-
-    # Check if half-time data exists in dataset
-    has_ht = "HTHG" in hist.columns and hist["HTHG"].notna().sum() > 5
-    if has_ht:
-      ht_p = self._fit_dc(
-          hist.dropna(subset=["HTHG", "HTAG"]),
-          "HTHG",
-          "HTAG",
-          teams,
-          team_idx,
-          use_rho=False,
-      )
-      lam_ht = np.exp(
-          ht_p["alpha"][team_idx[home]]
-          + ht_p["beta"][team_idx[away]]
-          + ht_p["gamma"]
-      )
-      mu_ht = np.exp(
-          ht_p["alpha"][team_idx[away]] + ht_p["beta"][team_idx[home]]
-      )
-    else:
-      lam_ht, mu_ht = 0.6, 0.4  # fallback generic 1H rates if HT data is absent
+    ht_hist = hist.dropna(subset=["HTHG", "HTAG"])
+    ht_p = self._fit_dc(
+        ht_hist, "HTHG", "HTAG", teams, team_idx, use_rho=False
+    )
 
     h_i, a_i = team_idx[home], team_idx[away]
     lam = np.exp(ft_p["alpha"][h_i] + ft_p["beta"][a_i] + ft_p["gamma"])
     mu = np.exp(ft_p["alpha"][a_i] + ft_p["beta"][h_i])
+    lam_ht = np.exp(ht_p["alpha"][h_i] + ht_p["beta"][a_i] + ht_p["gamma"])
+    mu_ht = np.exp(ht_p["alpha"][a_i] + ht_p["beta"][h_i])
 
     max_g = 8
     goals = np.arange(max_g)
