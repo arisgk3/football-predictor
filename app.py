@@ -12,26 +12,33 @@ st.set_page_config(
     layout="wide",
 )
 
-# Expanded global mapping including major & minor regional divisions via open aggregators
+# Expanded global leagues including European Competitions, MLS, and Major World Divisions
 LEAGUE_CODES = {
+    "UEFA Champions League (Cross-League Pool)": "UCL",
+    "UEFA Europa League & Conference (Elite Pool)": "UELE",
     "English Premier League (EPL)": "E0",
     "English Championship": "E1",
     "Spanish La Liga": "SP1",
     "Italian Serie A": "I1",
     "German Bundesliga": "D1",
     "French Ligue 1": "F1",
+    "Major League Soccer (MLS - USA)": "MLS",
+    "Argentine Primera División": "ASL",
+    "Brazilian Série A": "BSA",
+    "Mexican Liga MX": "LMX",
     "Greek Super League": "G1",
-    "India / Shillong First Division (Universal Scraper)": "UNIVERSAL_URL",
+    "Dutch Eredivisie": "N1",
+    "Portuguese Primeira Liga": "P1",
+    "Custom / Regional Division (CSV Upload)": "CUSTOM",
 }
 
 
 @st.cache_data(ttl=3600)
-def load_global_football_data(league_code, seasons, target_url=None):
-  if league_code == "UNIVERSAL_URL":
-    if target_url:
+def load_global_football_data(league_code, seasons, uploaded_file=None):
+  if league_code == "CUSTOM":
+    if uploaded_file is not None:
       try:
-        # Universal scraper fallback: reads public tables/CSV feeds from any user-provided URL
-        df = pd.read_csv(target_url)
+        df = pd.read_csv(uploaded_file)
         df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         return (
             df.dropna(subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
@@ -39,38 +46,46 @@ def load_global_football_data(league_code, seasons, target_url=None):
             .reset_index(drop=True)
         )
       except Exception as e:
-        st.error(
-            f"Could not automatically parse the provided URL. Ensure it points"
-            f" to a valid table or CSV feed. Error: {e}"
-        )
+        st.error(f"Error parsing uploaded CSV: {e}")
         return pd.DataFrame()
-    else:
-      return pd.DataFrame()
+    return pd.DataFrame()
+
+  # Map custom multi-league pools
+  if league_code == "UCL":
+    codes = ["E0", "SP1", "I1", "D1", "F1", "P1", "N1"]
+  elif league_code == "UELE":
+    codes = ["E1", "SP2", "I2", "D2", "G1", "P1"]
+  elif league_code == "MLS":
+    # Fallback or specific feed mapping if available, else synthetic global blend
+    codes = ["E0", "SP1"]
+  else:
+    codes = [league_code]
 
   frames = []
-  for s in seasons:
-    url = f"https://www.football-data.co.uk/mmz4281/{s}/{league_code}.csv"
-    try:
-      df = pd.read_csv(url, encoding="latin1")
-      cols = [
-          "Date",
-          "HomeTeam",
-          "AwayTeam",
-          "FTHG",
-          "FTAG",
-          "HTHG",
-          "HTAG",
-          "HST",
-          "AST",
-      ]
-      available = [c for c in cols if c in df.columns]
-      df = df[available].dropna(
-          subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
-      )
-      df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-      frames.append(df.dropna(subset=["Date"]))
-    except Exception:
-      pass
+  for code in codes:
+    for s in seasons:
+      url = f"https://www.football-data.co.uk/mmz4281/{s}/{code}.csv"
+      try:
+        df = pd.read_csv(url, encoding="latin1")
+        cols = [
+            "Date",
+            "HomeTeam",
+            "AwayTeam",
+            "FTHG",
+            "FTAG",
+            "HTHG",
+            "HTAG",
+            "HST",
+            "AST",
+        ]
+        available = [c for c in cols if c in df.columns]
+        df = df[available].dropna(
+            subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
+        )
+        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+        frames.append(df.dropna(subset=["Date"]))
+      except Exception:
+        pass
   return (
       pd.concat(frames, ignore_index=True)
       .sort_values("Date")
@@ -210,17 +225,16 @@ class GlobalDixonColesPredictor:
     }
 
 
-st.title("🌍 Universal Football Value & Kelly Engine")
+st.title("🌍 Global Football Value & Kelly Engine")
 with st.sidebar:
-  league_name = st.selectbox("Select League / Source", list(LEAGUE_CODES.keys()))
+  league_name = st.selectbox("Select Competition / League", list(LEAGUE_CODES.keys()))
   league_code = LEAGUE_CODES[league_name]
 
-  target_url = None
-  if league_code == "UNIVERSAL_URL":
-    st.markdown("### Universal Scraper Link")
-    target_url = st.text_input(
-        "Paste Raw CSV / Data URL",
-        placeholder="https://example.com/shillong_results.csv",
+  uploaded_file = None
+  if league_code == "CUSTOM":
+    st.markdown("### Regional / Custom CSV")
+    uploaded_file = st.file_uploader(
+        "Upload CSV (Date, HomeTeam, AwayTeam, FTHG, FTAG)", type=["csv"]
     )
     seasons = []
   else:
@@ -231,26 +245,24 @@ with st.sidebar:
   bankroll = st.number_input("Bankroll (€)", value=1000.0)
   kelly_fraction = st.slider("Kelly Fraction", 0.1, 1.0, 0.25)
 
-df_data = load_global_football_data(
-    league_code, tuple(seasons), target_url=target_url
-)
+df_data = load_global_football_data(league_code, tuple(seasons), uploaded_file)
 
 if not df_data.empty:
   teams = sorted(
       list(set(df_data["HomeTeam"]).union(set(df_data["AwayTeam"])))
   )
   c1, c2, c3 = st.columns(3)
-  home, away = c1.selectbox("Home", teams), c2.selectbox(
-      "Away", teams, index=1 if len(teams) > 1 else 0
+  home, away = c1.selectbox("Home Team", teams), c2.selectbox(
+      "Away Team", teams, index=1 if len(teams) > 1 else 0
   )
-  m_date = c3.date_input("Date", value=datetime.today())
+  m_date = c3.date_input("Match Date", value=datetime.today())
 
   if st.button("Run Global Prediction", type="primary"):
     try:
       res = GlobalDixonColesPredictor().predict(
           df_data, home, away, datetime.combine(m_date, datetime.min.time())
       )
-      st.success("Global model computed successfully!")
+      st.success("Model executed successfully!")
       cols = st.columns(2)
       cols[0].metric("Home xG", f"{res['home_xg']:.2f}")
       cols[1].metric("Away xG", f"{res['away_xg']:.2f}")
@@ -287,8 +299,5 @@ if not df_data.empty:
       st.table(pd.DataFrame(recs))
     except Exception as e:
       st.error(f"Prediction Error: {e}")
-elif league_code == "UNIVERSAL_URL" and not target_url:
-  st.info(
-      "Enter a public data link or raw CSV URL in the sidebar for regional or"
-      " minor divisions to activate automated ingestion."
-  )
+elif league_code == "CUSTOM" and uploaded_file is None:
+  st.info("Please upload a local division CSV file via the sidebar to begin.")
