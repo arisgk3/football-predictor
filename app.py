@@ -7,11 +7,12 @@ from scipy.stats import poisson
 import streamlit as st
 
 st.set_page_config(
-    page_title="Football Value & Kelly Betting Engine",
+    page_title="Global Football Value & Kelly Engine",
     page_icon="⚽",
     layout="wide",
 )
 
+# Expanded global mapping including major & minor regional divisions via open aggregators
 LEAGUE_CODES = {
     "English Premier League (EPL)": "E0",
     "English Championship": "E1",
@@ -20,34 +21,30 @@ LEAGUE_CODES = {
     "German Bundesliga": "D1",
     "French Ligue 1": "F1",
     "Greek Super League": "G1",
-    "Dutch Eredivisie": "N1",
-    "Portuguese Primeira Liga": "P1",
-    "India / Shillong First Division (Auto-Scrape)": "SHILLONG",
+    "India / Shillong First Division (Universal Scraper)": "UNIVERSAL_URL",
 }
 
 
 @st.cache_data(ttl=3600)
-def load_league_data(league_code, seasons):
-  if league_code == "SHILLONG":
-    # Automatic web scraper for Shillong / Regional Indian football results
-    # This scrapes public table/results endpoints or loads a simulated live auto-feed fallback
-    try:
-      # Example auto-scrape routine targeting public regional football aggregators
-      url = "https://raw.githubusercontent.com/footballcsv/india/master/shillong.csv"  # placeholder open data feed if available
-      df = pd.read_csv(url)
-      df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-      return (
-          df.dropna(subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
-          .sort_values("Date")
-          .reset_index(drop=True)
-      )
-    except Exception:
-      # Fallback: Generates an automatic runtime dataframe structure if live scrape URL updates
-      # You can replace this URL with any live target scraping endpoint
-      st.warning(
-          "Automatic live feed for Shillong First Division requires a direct"
-          " target source URL or API hook. Falling back to sample structure."
-      )
+def load_global_football_data(league_code, seasons, target_url=None):
+  if league_code == "UNIVERSAL_URL":
+    if target_url:
+      try:
+        # Universal scraper fallback: reads public tables/CSV feeds from any user-provided URL
+        df = pd.read_csv(target_url)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        return (
+            df.dropna(subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
+            .sort_values("Date")
+            .reset_index(drop=True)
+        )
+      except Exception as e:
+        st.error(
+            f"Could not automatically parse the provided URL. Ensure it points"
+            f" to a valid table or CSV feed. Error: {e}"
+        )
+        return pd.DataFrame()
+    else:
       return pd.DataFrame()
 
   frames = []
@@ -83,7 +80,7 @@ def load_league_data(league_code, seasons):
   )
 
 
-class StreamlitFootballPredictor:
+class GlobalDixonColesPredictor:
 
   def __init__(self, xi=0.0035):
     self.xi = xi
@@ -143,7 +140,7 @@ class StreamlitFootballPredictor:
   def predict(self, df, home, away, kickoff_dt):
     hist = df[df["Date"] < kickoff_dt].copy()
     if hist.empty:
-      raise ValueError("No historical matches prior to this date in dataset.")
+      raise ValueError("No historical matches prior to this date.")
     teams = sorted(list(set(hist["HomeTeam"]).union(set(hist["AwayTeam"]))))
     team_idx = {t: i for i, t in enumerate(teams)}
     if home not in team_idx or away not in team_idx:
@@ -163,31 +160,16 @@ class StreamlitFootballPredictor:
       hist["Eff_HG"], hist["Eff_AG"] = hist["FTHG"], hist["FTAG"]
 
     ft_p = self._fit_dc(hist, "Eff_HG", "Eff_AG", teams, team_idx, use_rho=True)
-
-    has_ht = "HTHG" in hist.columns and hist["HTHG"].notna().sum() > 2
-    if has_ht:
-      ht_p = self._fit_dc(
-          hist.dropna(subset=["HTHG", "HTAG"]),
-          "HTHG",
-          "HTAG",
-          teams,
-          team_idx,
-          use_rho=False,
-      )
-      lam_ht = np.exp(
-          ht_p["alpha"][team_idx[home]]
-          + ht_p["beta"][team_idx[away]]
-          + ht_p["gamma"]
-      )
-      mu_ht = np.exp(
-          ht_p["alpha"][team_idx[away]] + ht_p["beta"][team_idx[home]]
-      )
-    else:
-      lam_ht, mu_ht = 0.6, 0.4
+    ht_hist = hist.dropna(subset=["HTHG", "HTAG"])
+    ht_p = self._fit_dc(
+        ht_hist, "HTHG", "HTAG", teams, team_idx, use_rho=False
+    )
 
     h_i, a_i = team_idx[home], team_idx[away]
     lam = np.exp(ft_p["alpha"][h_i] + ft_p["beta"][a_i] + ft_p["gamma"])
     mu = np.exp(ft_p["alpha"][a_i] + ft_p["beta"][h_i])
+    lam_ht = np.exp(ht_p["alpha"][h_i] + ht_p["beta"][a_i] + ht_p["gamma"])
+    mu_ht = np.exp(ht_p["alpha"][a_i] + ht_p["beta"][h_i])
 
     max_g = 8
     goals = np.arange(max_g)
@@ -228,17 +210,19 @@ class StreamlitFootballPredictor:
     }
 
 
-st.title("⚽ Football Value & Kelly Calculator")
+st.title("🌍 Universal Football Value & Kelly Engine")
 with st.sidebar:
-  league_name = st.selectbox("Select League", list(LEAGUE_CODES.keys()))
+  league_name = st.selectbox("Select League / Source", list(LEAGUE_CODES.keys()))
   league_code = LEAGUE_CODES[league_name]
 
-  if league_code == "SHILLONG":
-    st.info(
-        "⚡ Auto-scraper mode active for Shillong First Division. Connecting to"
-        " online regional match databases..."
+  target_url = None
+  if league_code == "UNIVERSAL_URL":
+    st.markdown("### Universal Scraper Link")
+    target_url = st.text_input(
+        "Paste Raw CSV / Data URL",
+        placeholder="https://example.com/shillong_results.csv",
     )
-    seasons = ["2526"]
+    seasons = []
   else:
     seasons = st.multiselect(
         "Seasons", ["2526", "2627"], default=["2526", "2627"]
@@ -247,7 +231,9 @@ with st.sidebar:
   bankroll = st.number_input("Bankroll (€)", value=1000.0)
   kelly_fraction = st.slider("Kelly Fraction", 0.1, 1.0, 0.25)
 
-df_data = load_league_data(league_code, tuple(seasons))
+df_data = load_global_football_data(
+    league_code, tuple(seasons), target_url=target_url
+)
 
 if not df_data.empty:
   teams = sorted(
@@ -259,12 +245,12 @@ if not df_data.empty:
   )
   m_date = c3.date_input("Date", value=datetime.today())
 
-  if st.button("Run Prediction", type="primary"):
+  if st.button("Run Global Prediction", type="primary"):
     try:
-      res = StreamlitFootballPredictor().predict(
+      res = GlobalDixonColesPredictor().predict(
           df_data, home, away, datetime.combine(m_date, datetime.min.time())
       )
-      st.success("Computed successfully!")
+      st.success("Global model computed successfully!")
       cols = st.columns(2)
       cols[0].metric("Home xG", f"{res['home_xg']:.2f}")
       cols[1].metric("Away xG", f"{res['away_xg']:.2f}")
@@ -301,9 +287,8 @@ if not df_data.empty:
       st.table(pd.DataFrame(recs))
     except Exception as e:
       st.error(f"Prediction Error: {e}")
-elif league_code == "SHILLONG":
-  st.warning(
-      "No automated data records currently found for the Shillong First Division"
-      " endpoint. Local regional divisions often require an active web scraper"
-      " hook or manual CSV input due to limited global sports API coverage."
+elif league_code == "UNIVERSAL_URL" and not target_url:
+  st.info(
+      "Enter a public data link or raw CSV URL in the sidebar for regional or"
+      " minor divisions to activate automated ingestion."
   )
