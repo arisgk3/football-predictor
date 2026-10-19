@@ -13,6 +13,7 @@ st.set_page_config(
 )
 
 LEAGUE_CODES = {
+    "UEFA Champions League (UCL)": "UCL",
     "English Premier League (EPL)": "E0",
     "Spanish La Liga": "SP1",
     "Italian Serie A": "I1",
@@ -28,28 +29,50 @@ LEAGUE_CODES = {
 def load_league_data(league_code, seasons):
   frames = []
   for s in seasons:
-    url = f"https://www.football-data.co.uk/mmz4281/{s}/{league_code}.csv"
-    try:
-      df = pd.read_csv(url, encoding="latin1")
-      cols = [
-          "Date",
-          "HomeTeam",
-          "AwayTeam",
-          "FTHG",
-          "FTAG",
-          "HTHG",
-          "HTAG",
-          "HST",
-          "AST",
-      ]
-      available = [c for c in cols if c in df.columns]
-      df = df[available].dropna(
-          subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
-      )
-      df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
-      frames.append(df.dropna(subset=["Date"]))
-    except Exception:
-      pass
+    if league_code == "UCL":
+      # Pulls open-source Champions League match data from GitHub
+      url = f"https://raw.githubusercontent.com/openfootball/champions-league/master/{s.lower()[:2]}-{s.lower()[2:]}/cl.csv"
+      try:
+        df = pd.read_csv(url)
+        # Openfootball format cleaning
+        df = df.rename(
+            columns={
+                "Date": "Date",
+                "Team 1": "HomeTeam",
+                "Team 2": "AwayTeam",
+                "FT1": "FTHG",
+                "FT2": "FTAG",
+            }
+        )
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+        frames.append(
+            df.dropna(subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"])
+        )
+      except Exception:
+        pass
+    else:
+      url = f"https://www.football-data.co.uk/mmz4281/{s}/{league_code}.csv"
+      try:
+        df = pd.read_csv(url, encoding="latin1")
+        cols = [
+            "Date",
+            "HomeTeam",
+            "AwayTeam",
+            "FTHG",
+            "FTAG",
+            "HTHG",
+            "HTAG",
+            "HST",
+            "AST",
+        ]
+        available = [c for c in cols if c in df.columns]
+        df = df[available].dropna(
+            subset=["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
+        )
+        df["Date"] = pd.to_datetime(df["Date"], dayfirst=True, errors="coerce")
+        frames.append(df.dropna(subset=["Date"]))
+      except Exception:
+        pass
   return (
       pd.concat(frames, ignore_index=True)
       .sort_values("Date")
@@ -139,20 +162,32 @@ class StreamlitFootballPredictor:
       hist["Eff_HG"], hist["Eff_AG"] = hist["FTHG"], hist["FTAG"]
 
     ft_p = self._fit_dc(hist, "Eff_HG", "Eff_AG", teams, team_idx, use_rho=True)
-    ht_p = self._fit_dc(
-        hist.dropna(subset=["HTHG", "HTAG"]),
-        "HTHG",
-        "HTAG",
-        teams,
-        team_idx,
-        use_rho=False,
-    )
+
+    # Check if half-time data exists in dataset
+    has_ht = "HTHG" in hist.columns and hist["HTHG"].notna().sum() > 5
+    if has_ht:
+      ht_p = self._fit_dc(
+          hist.dropna(subset=["HTHG", "HTAG"]),
+          "HTHG",
+          "HTAG",
+          teams,
+          team_idx,
+          use_rho=False,
+      )
+      lam_ht = np.exp(
+          ht_p["alpha"][team_idx[home]]
+          + ht_p["beta"][team_idx[away]]
+          + ht_p["gamma"]
+      )
+      mu_ht = np.exp(
+          ht_p["alpha"][team_idx[away]] + ht_p["beta"][team_idx[home]]
+      )
+    else:
+      lam_ht, mu_ht = 0.6, 0.4  # fallback generic 1H rates if HT data is absent
 
     h_i, a_i = team_idx[home], team_idx[away]
     lam = np.exp(ft_p["alpha"][h_i] + ft_p["beta"][a_i] + ft_p["gamma"])
     mu = np.exp(ft_p["alpha"][a_i] + ft_p["beta"][h_i])
-    lam_ht = np.exp(ht_p["alpha"][h_i] + ht_p["beta"][a_i] + ht_p["gamma"])
-    mu_ht = np.exp(ht_p["alpha"][a_i] + ht_p["beta"][h_i])
 
     max_g = 8
     goals = np.arange(max_g)
